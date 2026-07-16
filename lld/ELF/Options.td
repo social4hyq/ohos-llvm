@@ -67,6 +67,10 @@ defm check_sections: B<"check-sections",
     "Check section addresses for overlaps (default)",
     "Do not check section addresses for overlaps">;
 
+defm code_sign: B<"code-sign",
+    "Code self sign when enable",
+    "Do not code self sign (default)">;
+
 defm compress_debug_sections:
   Eq<"compress-debug-sections", "Compress DWARF debug sections">,
   MetaVarName<"[none,zlib,zstd]">;

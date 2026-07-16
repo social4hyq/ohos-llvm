@@ -11,6 +11,7 @@
 #include "ARMErrataFix.h"
 #include "BPSectionOrderer.h"
 #include "CallGraphSort.h"
+#include "CodeSign.h"
 #include "Config.h"
 #include "InputFiles.h"
 #include "LinkerScript.h"
@@ -30,9 +31,15 @@
 #include "llvm/Support/BLAKE3.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/RandomNumberGenerator.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
+#include <array>
 #include <climits>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define DEBUG_TYPE "lld"
 
@@ -41,6 +48,7 @@ using namespace llvm::ELF;
 using namespace llvm::object;
 using namespace llvm::support;
 using namespace llvm::support::endian;
+using namespace FsVerityCodeSign;
 using namespace lld;
 using namespace lld::elf;
 
@@ -81,6 +89,7 @@ private:
   void writeSections();
   void writeSectionsBinary();
   void writeBuildId();
+  void writeSelfSign();
 
   Ctx &ctx;
   std::unique_ptr<FileOutputBuffer> &buffer;
@@ -381,6 +390,11 @@ template <class ELFT> void Writer<ELFT>::run() {
     // Backfill .note.gnu.build-id section content. This is done at last
     // because the content is usually a hash value of the entire output file.
     writeBuildId();
+
+    // Backfill .codesign section content.
+    if (ctx.arg.codeSign)
+      writeSelfSign();
+
     if (errCount(ctx))
       return;
 
@@ -388,6 +402,17 @@ template <class ELFT> void Writer<ELFT>::run() {
       if (auto e = buffer->commit())
         Err(ctx) << "failed to write output '" << buffer->getPath()
                  << "': " << std::move(e);
+      else if (ctx.arg.codeSign) {
+        // OHOS: flush the code-signed output to stable storage before this
+        // process returns. The cc shim execs clang which links + code-signs
+        // the binary in place; cargo then execs it immediately. Without an
+        // explicit sync, hmfs page-cache writeback can still be in flight
+        // when exec runs the new binary -> ETXTBSY (Text file busy, os 26).
+        if (int fd = ::open(buffer->getPath().str().c_str(), O_RDONLY); fd >= 0) {
+          ::fsync(fd);
+          ::close(fd);
+        }
+      }
     }
 
     if (!ctx.arg.cmseOutputLib.empty())
@@ -3087,6 +3112,44 @@ template <class ELFT> void Writer<ELFT>::writeBuildId() {
   }
   for (Partition &part : ctx.partitions)
     part.buildId->writeBuildId(output);
+}
+
+template <class ELFT> void Writer<ELFT>::writeSelfSign() {
+  std::unique_ptr<CodeSign> builder = std::make_unique<CodeSign>(CodeSign());
+
+  OutputSection *parent = ctx.in.codesign->getParent();
+  size_t offset = parent->offset + ctx.in.codesign->outSecOff;
+  llvm::ArrayRef<uint8_t> input{ctx.bufferStart, size_t(fileSize)};
+
+  FsVerity fsVerity{};
+  fsVerity.version = FsVerityConstants::VERSION;
+  fsVerity.hashAlgorithm = FsVerityConstants::SHA256_ALGORITHM;
+  fsVerity.log2BlockSize = FsVerityConstants::LOG_2_OF_FSVERITY_HASH_PAGE_SIZE;
+  fsVerity.fileSize = fileSize;
+
+  auto rootHash = builder->generateMerkleTreeRootHash(input, fileSize, offset);
+  memcpy(fsVerity.rawRootHash, rootHash.data(),
+         FsVerityConstants::ROOT_HASH_SIZE);
+
+  fsVerity.flag = FsVerityConstants::FLAG_SELF_SIGN;
+  fsVerity.csVersion = FsVerityConstants::ELF_CODE_SIGN_VERSION;
+
+  std::array<uint8_t, FsVerityConstants::DESCRIPTOR_SIZE> fsVerityBuffer;
+  memcpy(fsVerityBuffer.data(), &fsVerity, sizeof(fsVerityBuffer));
+  ArrayRef<uint8_t> block(fsVerityBuffer.data(),
+                          FsVerityConstants::DESCRIPTOR_SIZE);
+  std::array<uint8_t, 32> hash = SHA256::hash(block);
+  fsVerity.signSize = hash.size();
+
+  FsVerityWithSign fsWithSign{};
+  fsWithSign.type = FsVerityConstants::FS_VERITY_DESCRIPTOR_TYPE;
+  fsWithSign.length = FsVerityConstants::DESCRIPTOR_SIZE + hash.size();
+  fsWithSign.fsVerity = fsVerity;
+  llvm::copy(hash, fsWithSign.signature);
+
+  std::array<uint8_t, sizeof(FsVerityWithSign)> buffer;
+  memcpy(buffer.data(), &fsWithSign, sizeof(fsWithSign));
+  ctx.in.codesign->writeCodeSignSection(buffer.data(), sizeof(fsWithSign));
 }
 
 template void elf::writeResult<ELF32LE>(Ctx &);

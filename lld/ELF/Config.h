@@ -56,6 +56,7 @@ struct Partition;
 struct PhdrEntry;
 
 class BssSection;
+class CodeSignSection;
 class GdbIndexSection;
 class GotPltSection;
 class GotSection;
@@ -454,6 +455,8 @@ struct Config {
   int32_t splitStackAdjustSize;
   SmallVector<uint8_t, 0> packageMetadata;
 
+  bool codeSign = false;
+
   // The following config options do not directly correspond to any
   // particular command line options.
 
@@ -599,6 +602,7 @@ struct InStruct {
   std::unique_ptr<StringTableSection> strTab;
   std::unique_ptr<SymbolTableBaseSection> symTab;
   std::unique_ptr<SymtabShndxSection> symTabShndx;
+  std::unique_ptr<CodeSignSection> codesign;
 };
 
 struct Ctx : CommonLinkerContext {

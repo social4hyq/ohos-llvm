@@ -1898,6 +1898,8 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
 
   std::tie(ctx.arg.buildId, ctx.arg.buildIdVector) = getBuildId(ctx, args);
 
+  ctx.arg.codeSign = args.hasFlag(OPT_code_sign, OPT_no_code_sign, false);
+
   if (getZFlag(args, "pack-relative-relocs", "nopack-relative-relocs", false)) {
     ctx.arg.relrGlibc = true;
     ctx.arg.relrPackDynRelocs = true;
